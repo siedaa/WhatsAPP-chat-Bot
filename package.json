@@ -1,0 +1,14 @@
+{
+  "type": "module",
+  "scripts": {
+    "start": "node index.js"
+  },
+  "dependencies": {
+    "@langchain/core": "^0.3",
+    "@langchain/groq": "^0.1",
+    "baileys": "7.0.0-rc13",
+    "dotenv": "^16",
+    "pino": "^9",
+    "qrcode": "^1"
+  }
+}
