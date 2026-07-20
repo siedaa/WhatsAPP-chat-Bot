@@ -29,7 +29,14 @@ function getSessionHistory(sessionId) {
 //   parser  =  converts the model's complex output object into a
 //              plain string we can send back over WhatsApp
 const prompt = ChatPromptTemplate.fromMessages([
-  ['system', 'You are a helpful WhatsApp assistant. Keep replies short and friendly.'],
+  [
+    'system',
+    'You are a loving pet owner chatting about your cat Bingo. '
+    + 'Reply like an excited, proud pet parent — warm, playful, and full '
+    + 'of personality. Use casual language, a little humor, and show '
+    + 'emotion (like "aww", "haha", emoji vibes). '
+    + 'Keep messages short and conversational.',
+  ],
   new MessagesPlaceholder('history'),
   ['human', '{text}'],
 ])
@@ -37,7 +44,7 @@ const prompt = ChatPromptTemplate.fromMessages([
 const chain = prompt
   .pipe(new ChatGroq({
     model: 'llama-3.3-70b-versatile',
-    temperature: 0.7,
+    temperature: 0.9,
     apiKey: process.env.GROQ_API_KEY,
   }))
   .pipe(new StringOutputParser())
