@@ -1,10 +1,25 @@
-import 'dotenv/config'
+import 'dotenv/config'    //load .env in process.env
 import { makeWASocket, useMultiFileAuthState, fetchLatestWaWebVersion, DisconnectReason } from 'baileys'
-import { ChatPromptTemplate } from '@langchain/core/prompts'
+import { ChatPromptTemplate, MessagesPlaceholder } from '@langchain/core/prompts'  //MessagesPlaceholder : savig past message
 import { ChatGroq } from '@langchain/groq'
-import { StringOutputParser } from '@langchain/core/output_parsers'
-import pino from 'pino'
+import { StringOutputParser } from '@langchain/core/output_parsers'  
+import { RunnableWithMessageHistory } from '@langchain/core/runnables'  //converting model respone in to plain text
+import { InMemoryChatMessageHistory } from '@langchain/core/chat_history' //auto saves chat history in every call 
+import pino from 'pino'   
 import qrcode from 'qrcode'
+
+// --- Per-sender conversation memory ---
+// In-memory store mapping phone numbers to their chat histories.
+// This is per-process only — all histories are lost if the bot
+// restarts, which is fine for this assignment (no database yet).
+const store = {}
+
+function getSessionHistory(sessionId) {
+  if (!store[sessionId]) {
+    store[sessionId] = new InMemoryChatMessageHistory()
+  }
+  return store[sessionId]
+}
 
 // --- LangChain AI chain ---
 // A "chain" is a pipeline of components that data flows through.
@@ -13,16 +28,28 @@ import qrcode from 'qrcode'
 //   model   =  sends that chat to Groq's LLM and gets a reply
 //   parser  =  converts the model's complex output object into a
 //              plain string we can send back over WhatsApp
-const chain = ChatPromptTemplate.fromMessages([
+const prompt = ChatPromptTemplate.fromMessages([
   ['system', 'You are a helpful WhatsApp assistant. Keep replies short and friendly.'],
+  new MessagesPlaceholder('history'),
   ['human', '{text}'],
 ])
+
+const chain = prompt
   .pipe(new ChatGroq({
     model: 'llama-3.3-70b-versatile',
     temperature: 0.7,
     apiKey: process.env.GROQ_API_KEY,
   }))
   .pipe(new StringOutputParser())
+
+// Wrap the raw chain with history management so that past turns are
+// automatically injected into the "history" placeholder on each call.
+const chainWithHistory = new RunnableWithMessageHistory({
+  runnable: chain,
+  getMessageHistory: getSessionHistory,
+  inputMessagesKey: 'text',
+  historyMessagesKey: 'history',
+})
 
 async function startBot() {
   const logger = pino({ level: 'silent' })
@@ -99,9 +126,14 @@ async function startBot() {
 
     // Send the message through the LangChain chain and reply with the result.
     // The chain pipes the user's text through a chat prompt, the Groq model,
-    // and a string-output parser.
+    // and a string-output parser. Per-sender conversation history is managed
+    // via the session ID (the sender's phone number).
+    const senderId = message.key.remoteJid.split('@')[0]
     try {
-      const reply = await chain.invoke({ text })
+      const reply = await chainWithHistory.invoke(
+        { text },
+        { configurable: { sessionId: senderId } },
+      )
       await sock.sendMessage(message.key.remoteJid, { text: reply })
     } catch (err) {
       console.error('Groq API error:', err)
