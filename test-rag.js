@@ -5,6 +5,8 @@ const questions = [
   'What does Bingo like to eat?',
   'Does Bingo go outside?',
   "What's the capital of France?",
+  "What's Bingo's job?",
+  'Does Bingo like swimming?',
 ]
 
 for (const q of questions) {

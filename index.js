@@ -1,4 +1,5 @@
 import 'dotenv/config'    //load .env in process.env
+import { handleMessage } from './router.js'
 import { makeWASocket, useMultiFileAuthState, fetchLatestWaWebVersion, DisconnectReason } from 'baileys'
 import { ChatPromptTemplate, MessagesPlaceholder } from '@langchain/core/prompts'  //MessagesPlaceholder : savig past message
 import { ChatGroq } from '@langchain/groq'
@@ -137,10 +138,7 @@ async function startBot() {
     // via the session ID (the sender's phone number).
     const senderId = message.key.remoteJid.split('@')[0]
     try {
-      const reply = await chainWithHistory.invoke(
-        { text },
-        { configurable: { sessionId: senderId } },
-      )
+      const reply = await handleMessage(senderId, text, chainWithHistory)
       await sock.sendMessage(message.key.remoteJid, { text: reply })
     } catch (err) {
       console.error('Groq API error:', err)

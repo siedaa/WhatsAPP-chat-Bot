@@ -12,7 +12,7 @@ const factSchema = z.object({
   city: z.string().nullable().describe('The city they live in'),
   profession: z.string().nullable().describe('Their job or profession'),
   favoriteFood: z.string().nullable().describe('Their favorite food or dish'),
-  hobbies: z.array(z.string()).nullable().describe('Their hobbies or interests'),
+  hobbies: z.array(z.string()).nullable().describe("an array of hobby strings, e.g. ['hiking', 'painting'] — even a single hobby must still be wrapped in an array, never a plain string"),
   other: z.string().nullable().describe('Any other personal fact not covered above'),
 })
 
@@ -25,13 +25,28 @@ const extractor = new ChatGroq({
 }).withStructuredOutput(factSchema)
 
 // Extract personal facts from a single message string.
+// Returns an all-null object if the structured call fails, so the
+// caller can continue without crashing.
 export async function extractFacts(message) {
-  return extractor.invoke([
-    {
-      role: 'human',
-      content: `Extract personal facts from this message:\n\n${message}`,
-    },
-  ])
+  try {
+    return await extractor.invoke([
+      {
+        role: 'human',
+        content: `Extract personal facts from this message:\n\n${message}`,
+      },
+    ])
+  } catch (err) {
+    console.warn(`extractFacts failed, skipping fact extraction for this message: ${err.message}`)
+    return {
+      name: null,
+      age: null,
+      city: null,
+      profession: null,
+      favoriteFood: null,
+      hobbies: null,
+      other: null,
+    }
+  }
 }
 
 // --- In-memory profile store ---
