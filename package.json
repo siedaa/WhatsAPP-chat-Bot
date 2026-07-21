@@ -9,6 +9,7 @@
     "@langchain/groq": "^0.1",
     "@xenova/transformers": "^2",
     "baileys": "7.0.0-rc13",
+    "zod": "^3",
     "dotenv": "^16",
     "langchain": "^0.3",
     "pino": "^9",
