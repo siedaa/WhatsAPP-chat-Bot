@@ -1,6 +1,7 @@
 import 'dotenv/config'    //load .env in process.env
 import { handleMessage } from './router.js'
-import { makeWASocket, useMultiFileAuthState, fetchLatestWaWebVersion, DisconnectReason } from 'baileys'
+import { rememberSentMessage, senderIdFor, shouldAnswer } from './access.js'
+import { makeWASocket, useMultiFileAuthState, fetchLatestWaWebVersion, DisconnectReason, generateMessageIDV2 } from 'baileys'
 import { ChatPromptTemplate, MessagesPlaceholder } from '@langchain/core/prompts'  //MessagesPlaceholder : savig past message
 import { ChatGroq } from '@langchain/groq'
 import { StringOutputParser } from '@langchain/core/output_parsers'  
@@ -15,11 +16,25 @@ import qrcode from 'qrcode'
 // restarts, which is fine for this assignment (no database yet).
 const store = {}
 
-function getSessionHistory(sessionId) {
+// Only the most recent messages are kept, so long chats stay cheap and
+// never grow past the model's limits.
+const MAX_HISTORY_MESSAGES = 20
+const MAX_INPUT_CHARS = 2000
+
+async function getSessionHistory(sessionId) {
   if (!store[sessionId]) {
     store[sessionId] = new InMemoryChatMessageHistory()
   }
-  return store[sessionId]
+  const history = store[sessionId]
+  const messages = await history.getMessages()
+  if (messages.length > MAX_HISTORY_MESSAGES) {
+    const recent = messages.slice(-MAX_HISTORY_MESSAGES)
+    // A conversation sent to the model should start with the user's turn.
+    const firstHuman = recent.findIndex(m => m.getType() === 'human')
+    await history.clear()
+    await history.addMessages(recent.slice(Math.max(firstHuman, 0)))
+  }
+  return history
 }
 
 // --- LangChain AI chain ---
@@ -59,6 +74,69 @@ const chainWithHistory = new RunnableWithMessageHistory({
   historyMessagesKey: 'history',
 })
 
+// --- Reconnecting ---
+// Waits longer after each failed attempt (1s, 2s, 4s ... up to 60s) so a
+// WhatsApp outage doesn't turn into a tight retry loop.
+const MAX_RECONNECT_DELAY_MS = 60_000
+let reconnectAttempts = 0
+let reconnectTimer = null
+
+function scheduleReconnect() {
+  if (reconnectTimer) return
+  const delay = Math.min(1000 * 2 ** reconnectAttempts, MAX_RECONNECT_DELAY_MS)
+  reconnectAttempts += 1
+  console.log(`Reconnecting in ${delay / 1000}s...`)
+  reconnectTimer = setTimeout(() => {
+    reconnectTimer = null
+    startBot().catch(handleStartFailure)
+  }, delay)
+}
+
+function handleStartFailure(err) {
+  console.error('Could not start the WhatsApp connection:', err)
+  scheduleReconnect()
+}
+
+// --- Message handling ---
+// Each person's messages are answered one at a time and in order, so two
+// quick messages can't mix up that person's conversation history.
+const senderQueues = new Map()
+
+function enqueue(senderId, task) {
+  const previous = senderQueues.get(senderId) ?? Promise.resolve()
+  const next = previous.then(task, task)
+  senderQueues.set(senderId, next)
+  next.finally(() => {
+    if (senderQueues.get(senderId) === next) senderQueues.delete(senderId)
+  })
+}
+
+// Sending can fail if the connection drops mid-reply. That is logged
+// rather than thrown, so it can never take the whole bot down.
+async function sendText(sock, jid, text) {
+  const messageId = generateMessageIDV2(sock.user?.id)
+  rememberSentMessage(messageId)
+  try {
+    await sock.sendMessage(jid, { text }, { messageId })
+  } catch (err) {
+    console.error('Could not send WhatsApp message:', err)
+  }
+}
+
+async function answerMessage(sock, jid, senderId, text) {
+  if (text.length > MAX_INPUT_CHARS) {
+    await sendText(sock, jid, `That message is too long for me, please keep it under ${MAX_INPUT_CHARS} characters.`)
+    return
+  }
+  try {
+    const reply = await handleMessage(senderId, text, chainWithHistory)
+    await sendText(sock, jid, reply)
+  } catch (err) {
+    console.error('Could not generate a reply:', err)
+    await sendText(sock, jid, "Sorry, I couldn't think of a reply just now, try again in a moment")
+  }
+}
+
 async function startBot() {
   const logger = pino({ level: 'silent' })
 
@@ -93,18 +171,24 @@ async function startBot() {
     }
 
     if (connection === 'open') {
+      reconnectAttempts = 0
       console.log('WhatsApp connection opened successfully')
     }
 
     if (connection === 'close') {
-      const shouldReconnect = lastDisconnect?.error?.output?.statusCode !== DisconnectReason.loggedOut
-      if (shouldReconnect) {
-        // Transient disconnect (network issue, server restart, etc.) – reconnect
-        console.log('Connection closed, reconnecting...')
-        startBot()
-      } else {
+      const statusCode = lastDisconnect?.error?.output?.statusCode
+      if (statusCode === DisconnectReason.loggedOut) {
         // Explicit logout – can't recover without re-scanning QR
         console.log('Logged out. Delete auth_info_baileys/ and restart.')
+      } else if (statusCode === DisconnectReason.connectionReplaced) {
+        // Reconnecting here would make two running copies kick each other off
+        console.log('This session was opened somewhere else. Stop the other copy, then restart.')
+      } else if (statusCode === DisconnectReason.forbidden) {
+        console.log('WhatsApp refused this account (403). Not reconnecting.')
+      } else {
+        // Transient disconnect (network issue, server restart, etc.) – reconnect
+        console.log(`Connection closed (status ${statusCode}).`)
+        scheduleReconnect()
       }
     }
   })
@@ -116,37 +200,26 @@ async function startBot() {
   sock.ev.on('creds.update', saveCreds)
 
   // --- Incoming-messages handler ---
-  // Fires when one or more new messages arrive. We only process the
-  // first message in the batch.
-  sock.ev.on('messages.upsert', async ({ messages }) => {
-    const message = messages[0]
-    // Skip messages that have no content, are sent by us, or aren't
-    // 1:1 chats (group messages end with @g.us, status stories use
-    // status@broadcast).
-    if (!message.message || message.key.fromMe) return
-    if (message.key.remoteJid.endsWith('@g.us')) return
-    if (message.key.remoteJid === 'status@broadcast') return
+  // 'notify' means a live message. Anything else is history being synced
+  // after a reconnect, and answering that would reply to old messages.
+  sock.ev.on('messages.upsert', ({ messages, type }) => {
+    if (type !== 'notify') return
 
-    // Extract plain text – either a simple conversation or an
-    // extended-text message (used by newer WhatsApp clients).
-    const text = message.message.conversation || message.message.extendedTextMessage?.text
-    if (!text) return
+    for (const message of messages) {
+      if (!shouldAnswer(message, sock.user)) continue
 
-    // Send the message through the LangChain chain and reply with the result.
-    // The chain pipes the user's text through a chat prompt, the Groq model,
-    // and a string-output parser. Per-sender conversation history is managed
-    // via the session ID (the sender's phone number).
-    const senderId = message.key.remoteJid.split('@')[0]
-    try {
-      const reply = await handleMessage(senderId, text, chainWithHistory)
-      await sock.sendMessage(message.key.remoteJid, { text: reply })
-    } catch (err) {
-      console.error('Groq API error:', err)
-      await sock.sendMessage(message.key.remoteJid, {
-        text: "Sorry, I couldn't think of a reply just now — try again in a moment",
-      })
+      // Extract plain text – either a simple conversation or an
+      // extended-text message (used by newer WhatsApp clients).
+      const text = message.message.conversation || message.message.extendedTextMessage?.text
+      if (!text) continue
+
+      const senderId = senderIdFor(message.key)
+      enqueue(senderId, () => answerMessage(sock, message.key.remoteJid, senderId, text))
     }
   })
 }
 
-startBot()
+// Last line of defence: log an unexpected async error instead of exiting.
+process.on('unhandledRejection', err => console.error('Unhandled error:', err))
+
+startBot().catch(handleStartFailure)
