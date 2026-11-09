@@ -1,11 +1,11 @@
 import 'dotenv/config'
 import { z } from 'zod'
 import { ChatGroq } from '@langchain/groq'
+import { FAST_MODEL } from './models.js'
 
 // Schema for personal facts a user might share in chat.
-// Every field is optional — a single message usually won't contain
-// all of them, and the extractor will return null for anything
-// the message didn't mention.
+// A single message usually won't contain all of them, and the
+// extractor returns null for anything the message didn't mention.
 const factSchema = z.object({
   name: z.string().nullable().describe("The person's name"),
   age: z.string().nullable().describe("The person's age"),
@@ -19,10 +19,16 @@ const factSchema = z.object({
 // Structured extractor: given a chat message, returns a typed object
 // with nulls for any fields the message didn't mention.
 const extractor = new ChatGroq({
-  model: 'llama-3.3-70b-versatile',
+  model: FAST_MODEL,
   temperature: 0,
   apiKey: process.env.GROQ_API_KEY,
 }).withStructuredOutput(factSchema)
+
+const EXTRACTION_RULES = 'Extract personal facts the sender states about '
+  + 'THEMSELVES in their message. Use null for every field they did not '
+  + 'state. Facts about other people, pets or characters are not facts '
+  + 'about the sender, so use null for those. Questions usually contain '
+  + 'no facts. Never guess or fill in a value.'
 
 // Extract personal facts from a single message string.
 // Returns an all-null object if the structured call fails, so the
@@ -30,10 +36,8 @@ const extractor = new ChatGroq({
 export async function extractFacts(message) {
   try {
     return await extractor.invoke([
-      {
-        role: 'human',
-        content: `Extract personal facts from this message:\n\n${message}`,
-      },
+      { role: 'system', content: EXTRACTION_RULES },
+      { role: 'human', content: message },
     ])
   } catch (err) {
     console.warn(`extractFacts failed, skipping fact extraction for this message: ${err.message}`)
@@ -53,36 +57,51 @@ export async function extractFacts(message) {
 // Maps senderId -> merged profile object. All data is lost on restart.
 const profiles = {}
 
-// Merge extracted facts into a sender's stored profile.
-// - Non-null fields in `facts` overwrite existing values.
-// - Null fields are ignored (don't erase previously known info).
+// Models sometimes fill a field with these instead of null. Treating them
+// as real answers would overwrite something true with nothing.
+const EMPTY_VALUES = new Set(['', 'null', 'none', 'unknown', 'n/a', 'not mentioned'])
+
+function isRealValue(value) {
+  return typeof value === 'string' && !EMPTY_VALUES.has(value.trim().toLowerCase())
+}
+
+// Merge extracted facts into a sender's stored profile, and return
+// whether anything was saved.
+// - Real values in `facts` overwrite existing values.
+// - Null or blank fields are ignored (don't erase previously known info).
 // - The `hobbies` array is merged & deduped rather than replaced.
 export function saveFacts(senderId, facts) {
   if (!profiles[senderId]) {
     profiles[senderId] = {}
   }
   const profile = profiles[senderId]
+  let saved = false
 
   for (const [key, value] of Object.entries(facts)) {
-    if (value === null) continue
-
     if (key === 'hobbies' && Array.isArray(value)) {
-      const existing = profile.hobbies || []
-      const merged = [...new Set([...existing, ...value])]
-      profile.hobbies = merged
-    } else {
-      profile[key] = value
+      const newHobbies = value.filter(isRealValue)
+      if (newHobbies.length === 0) continue
+      profile.hobbies = [...new Set([...(profile.hobbies || []), ...newHobbies])]
+      saved = true
+    } else if (isRealValue(value)) {
+      profile[key] = value.trim()
+      saved = true
     }
   }
+  return saved
+}
+
+export function hasProfile(senderId) {
+  return Object.keys(profiles[senderId] || {}).length > 0
 }
 
 // Return a friendly human-readable summary of everything known
 // about a sender, or a fallback message if nothing is stored yet.
 export function formatProfile(senderId) {
-  const profile = profiles[senderId]
-  if (!profile || Object.keys(profile).length === 0) {
+  if (!hasProfile(senderId)) {
     return "I don't know anything about you yet!"
   }
+  const profile = profiles[senderId]
 
   const lines = ['Here\'s what I know about you:']
   const labels = {
