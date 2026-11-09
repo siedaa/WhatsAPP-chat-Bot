@@ -1,5 +1,12 @@
 {
+  "name": "whatsapp-ai-bot",
+  "version": "1.0.0",
+  "private": true,
+  "description": "WhatsApp chatbot with AI routing, per-person memory and RAG over a small knowledge base",
   "type": "module",
+  "engines": {
+    "node": ">=20"
+  },
   "scripts": {
     "start": "node index.js"
   },

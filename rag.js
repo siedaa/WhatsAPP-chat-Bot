@@ -7,10 +7,17 @@ import { ChatGroq } from '@langchain/groq'
 import { CHAT_MODEL } from './models.js'
 import { StringOutputParser } from '@langchain/core/output_parsers'
 
+// Bingo's age is worked out when the bot starts, so it never goes stale.
+function bingoAgeFact() {
+  const now = new Date()
+  const monthsOld = (now.getFullYear() - 2020) * 12 + now.getMonth() - 6 // born July 2020
+  return `Bingo is ${Math.floor(monthsOld / 12)} years old.`
+}
+
 // Reads kb.txt and returns an array of non-empty, trimmed fact lines.
 function loadFacts() {
   const raw = readFileSync('kb.txt', 'utf-8')
-  return raw.split('\n').map(l => l.trim()).filter(Boolean)
+  return [bingoAgeFact(), ...raw.split('\n').map(l => l.trim()).filter(Boolean)]
 }
 
 // Build the embeddings (runs locally via @xenova/transformers).
@@ -40,7 +47,7 @@ const ragPrompt = ChatPromptTemplate.fromMessages([
     + 'anything about Bingo that the notes do not state, even if it seems '
     + 'plausible. If the notes do not answer the question, say in one '
     + 'friendly sentence that you are not sure about that, and do not '
-    + 'speculate.\n\n'
+    + 'speculate or offer to find out.\n\n'
     + 'Be warm and playful in HOW you say it, with a little humor and '
     + 'emoji, and keep it short, in plain text with no markdown. Speak as '
     + 'his owner. Never mention notes, '

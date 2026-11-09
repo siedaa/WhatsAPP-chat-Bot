@@ -50,7 +50,8 @@ async function sendText(sock, jid, text) {
   const messageId = generateMessageIDV2(sock.user?.id)
   rememberSentMessage(messageId)
   try {
-    await sock.sendMessage(jid, { text }, { messageId })
+    // WhatsApp's bold is *text*; models often write Markdown's **text**.
+    await sock.sendMessage(jid, { text: text.replace(/\*\*(.+?)\*\*/g, '*$1*') }, { messageId })
   } catch (err) {
     console.error('Could not send WhatsApp message:', err)
   }
