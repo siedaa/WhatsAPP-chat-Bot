@@ -12,7 +12,11 @@ A personal WhatsApp chatbot built with **Baileys**, **LangChain** and **Groq**. 
 
 ## Example conversation
 
-Real output from the bot's message handler:
+Live on WhatsApp:
+
+<img src="screenshots/bingo-chat.jpg" alt="WhatsApp chat where the bot answers questions about Bingo the cat" width="320">
+
+A longer conversation, showing memory and topic changes. This is real output from the bot's message handler:
 
 ```text
 You: My name is Fati and I live in Lahore
